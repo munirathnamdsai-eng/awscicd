@@ -1,0 +1,21 @@
+{
+    "full_name": "Munirathnam CN",
+    "name": "Muni",
+    "current_role": "AI Engineer",
+    "location": "Chennai",
+    "email": "munirathanmdsai@gmail.com",
+    "linkedin": "www.linkedin.com/in/munirathnam-cn",
+    "specialties": [
+      "Machine Learning",
+      "Gen AI",
+      "Agentic AI"
+    ],
+    "years_experience": 10,
+    "education": [
+      {
+        "degree": "MCA",
+        "institution": "Anna University",
+        "year": "2020"
+      }
+    ]
+  }
