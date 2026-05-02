@@ -26,7 +26,7 @@ concurrency:
 jobs:
   deploy:
     name: Deploy to ${{ github.event.inputs.environment || 'dev' }}
-    runs-on: ubuntu-latest
+    runs-on: windows-latest        # ← Changed from ubuntu-latest
     environment: ${{ github.event.inputs.environment || 'dev' }}
 
     env:
@@ -50,8 +50,9 @@ jobs:
 
       - name: Install uv
         run: |
-          curl -LsSf https://astral.sh/uv/install.sh | sh
-          echo "$HOME/.local/bin" >> $GITHUB_PATH
+          powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+          echo "$env:USERPROFILE\.local\bin" >> $env:GITHUB_PATH
+        shell: pwsh
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
@@ -67,39 +68,52 @@ jobs:
 
       - name: Run Deployment Script
         run: |
-          chmod +x scripts/deploy.sh
-          ./scripts/deploy.sh $DEPLOY_ENV
+          .\scripts\deploy.ps1 -Environment $env:DEPLOY_ENV
+        shell: pwsh
         env:
           AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
           DEFAULT_AWS_REGION: ${{ secrets.DEFAULT_AWS_REGION }}
+          TF_STATE_BUCKET: ${{ secrets.TF_STATE_BUCKET }}
+          TF_STATE_REGION: ${{ secrets.TF_STATE_REGION }}
 
       - name: Get Deployment URLs
         id: deploy_outputs
         working-directory: ./terraform
         run: |
-          terraform init \
-            -backend-config="bucket=$TF_STATE_BUCKET" \
-            -backend-config="key=$DEPLOY_ENV/terraform.tfstate" \
-            -backend-config="region=$TF_STATE_REGION" \
+          $awsAccountId = aws sts get-caller-identity --query Account --output text
+          $awsRegion = if ($env:TF_STATE_REGION) { $env:TF_STATE_REGION } else { "us-east-1" }
+          terraform init -input=false `
+            -backend-config="bucket=$env:TF_STATE_BUCKET" `
+            -backend-config="key=$env:DEPLOY_ENV/terraform.tfstate" `
+            -backend-config="region=$awsRegion" `
+            -backend-config="encrypt=true" `
             -reconfigure
-          terraform workspace select $DEPLOY_ENV || terraform workspace new $DEPLOY_ENV
-          echo "cloudfront_url=$(terraform output -raw cloudfront_url)" >> $GITHUB_OUTPUT
-          echo "cloudfront_id=$(terraform output -raw cloudfront_distribution_id)" >> $GITHUB_OUTPUT
-          echo "api_url=$(terraform output -raw api_gateway_url)" >> $GITHUB_OUTPUT
-          echo "frontend_bucket=$(terraform output -raw s3_frontend_bucket)" >> $GITHUB_OUTPUT
+          terraform workspace select $env:DEPLOY_ENV
+          if ($LASTEXITCODE -ne 0) { terraform workspace new $env:DEPLOY_ENV }
+          $cloudfrontUrl = terraform output -raw cloudfront_url
+          $cloudfrontId  = terraform output -raw cloudfront_distribution_id
+          $apiUrl        = terraform output -raw api_gateway_url
+          $frontendBucket = terraform output -raw s3_frontend_bucket
+          echo "cloudfront_url=$cloudfrontUrl"   >> $env:GITHUB_OUTPUT
+          echo "cloudfront_id=$cloudfrontId"     >> $env:GITHUB_OUTPUT
+          echo "api_url=$apiUrl"                 >> $env:GITHUB_OUTPUT
+          echo "frontend_bucket=$frontendBucket" >> $env:GITHUB_OUTPUT
+        shell: pwsh
         env:
           TF_STATE_BUCKET: ${{ secrets.TF_STATE_BUCKET }}
           TF_STATE_REGION: ${{ secrets.TF_STATE_REGION }}
 
       - name: Invalidate CloudFront
         run: |
-          aws cloudfront create-invalidation \
-            --distribution-id ${{ steps.deploy_outputs.outputs.cloudfront_id }} \
+          aws cloudfront create-invalidation `
+            --distribution-id ${{ steps.deploy_outputs.outputs.cloudfront_id }} `
             --paths "/*"
+        shell: pwsh
 
       - name: Deployment Summary
         run: |
-          echo "✅ Deployment Complete!"
-          echo "🌐 CloudFront URL: ${{ steps.deploy_outputs.outputs.cloudfront_url }}"
-          echo "📡 API Gateway:    ${{ steps.deploy_outputs.outputs.api_url }}"
-          echo "🪣 Frontend Bucket: ${{ steps.deploy_outputs.outputs.frontend_bucket }}"
+          Write-Host "✅ Deployment Complete!"
+          Write-Host "🌐 CloudFront URL : ${{ steps.deploy_outputs.outputs.cloudfront_url }}"
+          Write-Host "📡 API Gateway    : ${{ steps.deploy_outputs.outputs.api_url }}"
+          Write-Host "🪣 Frontend Bucket: ${{ steps.deploy_outputs.outputs.frontend_bucket }}"
+        shell: pwsh

@@ -1,62 +1,86 @@
 param(
-    [string]$Environment = "dev",   # dev | test | prod
+    [Parameter(Mandatory=$true)]
+    [string]$Environment,
     [string]$ProjectName = "twin"
 )
-$ErrorActionPreference = "Stop"
 
-Write-Host "Deploying $ProjectName to $Environment ..." -ForegroundColor Green
+# Validate environment parameter
+if ($Environment -notmatch '^(dev|test|prod)$') {
+    Write-Host "Error: Invalid environment '$Environment'" -ForegroundColor Red
+    Write-Host "Available environments: dev, test, prod" -ForegroundColor Yellow
+    exit 1
+}
 
-# 1. Build Lambda package
-Set-Location (Split-Path $PSScriptRoot -Parent)   # project root
-Write-Host "Building Lambda package..." -ForegroundColor Yellow
-Set-Location backend
-uv run deploy.py
-Set-Location ..
+Write-Host "Preparing to destroy $ProjectName-$Environment infrastructure..." -ForegroundColor Yellow
 
-# 2. Terraform workspace & apply
-Set-Location terraform
-AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-AWS_REGION=${DEFAULT_AWS_REGION:-us-east-1}
-terraform init -input=false \
-  -backend-config="bucket=twin-terraform-state-${AWS_ACCOUNT_ID}" \
-  -backend-config="key=${ENVIRONMENT}/terraform.tfstate" \
-  -backend-config="region=${AWS_REGION}" \
-  -backend-config="dynamodb_table=twin-terraform-locks" \
+# Navigate to terraform directory
+Set-Location (Join-Path (Split-Path $PSScriptRoot -Parent) "terraform")
+
+# Get AWS Account ID for backend configuration
+$awsAccountId = aws sts get-caller-identity --query Account --output text
+$awsRegion = if ($env:DEFAULT_AWS_REGION) { $env:DEFAULT_AWS_REGION } else { "us-east-1" }
+
+# Initialize terraform with S3 backend
+Write-Host "Initializing Terraform with S3 backend..." -ForegroundColor Yellow
+terraform init -input=false `
+  -backend-config="bucket=twin-terraform-state-$awsAccountId" `
+  -backend-config="key=$Environment/terraform.tfstate" `
+  -backend-config="region=$awsRegion" `
+  -backend-config="dynamodb_table=twin-terraform-locks" `
   -backend-config="encrypt=true"
 
-if (-not (terraform workspace list | Select-String $Environment)) {
-    terraform workspace new $Environment
+# Check if workspace exists
+$workspaces = terraform workspace list
+if (-not ($workspaces | Select-String $Environment)) {
+    Write-Host "Error: Workspace '$Environment' does not exist" -ForegroundColor Red
+    Write-Host "Available workspaces:" -ForegroundColor Yellow
+    terraform workspace list
+    exit 1
+}
+
+# Select the workspace
+terraform workspace select $Environment
+
+Write-Host "Emptying S3 buckets..." -ForegroundColor Yellow
+
+# Define bucket names with account ID (matching Day 4 naming)
+$FrontendBucket = "$ProjectName-$Environment-frontend-$awsAccountId"
+$MemoryBucket = "$ProjectName-$Environment-memory-$awsAccountId"
+
+# Empty frontend bucket if it exists
+try {
+    aws s3 ls "s3://$FrontendBucket" 2>$null | Out-Null
+    Write-Host "  Emptying $FrontendBucket..." -ForegroundColor Gray
+    aws s3 rm "s3://$FrontendBucket" --recursive
+} catch {
+    Write-Host "  Frontend bucket not found or already empty" -ForegroundColor Gray
+}
+
+# Empty memory bucket if it exists
+try {
+    aws s3 ls "s3://$MemoryBucket" 2>$null | Out-Null
+    Write-Host "  Emptying $MemoryBucket..." -ForegroundColor Gray
+    aws s3 rm "s3://$MemoryBucket" --recursive
+} catch {
+    Write-Host "  Memory bucket not found or already empty" -ForegroundColor Gray
+}
+
+Write-Host "Running terraform destroy..." -ForegroundColor Yellow
+
+# Run terraform destroy with auto-approve
+if ($Environment -eq "prod" -and (Test-Path "prod.tfvars")) {
+    terraform destroy -var-file=prod.tfvars `
+                     -var="project_name=$ProjectName" `
+                     -var="environment=$Environment" `
+                     -auto-approve
 } else {
-    terraform workspace select $Environment
+    terraform destroy -var="project_name=$ProjectName" `
+                     -var="environment=$Environment" `
+                     -auto-approve
 }
 
-if ($Environment -eq "prod") {
-    terraform apply -var-file=prod.tfvars -var="project_name=$ProjectName" -var="environment=$Environment" -auto-approve
-} else {
-    terraform apply -var="project_name=$ProjectName" -var="environment=$Environment" -auto-approve
-}
-
-$ApiUrl        = terraform output -raw api_gateway_url
-$FrontendBucket = terraform output -raw s3_frontend_bucket
-try { $CustomUrl = terraform output -raw custom_domain_url } catch { $CustomUrl = "" }
-
-# 3. Build + deploy frontend
-Set-Location ..\frontend
-
-# Create production environment file with API URL
-Write-Host "Setting API URL for production..." -ForegroundColor Yellow
-"NEXT_PUBLIC_API_URL=$ApiUrl" | Out-File .env.production -Encoding utf8
-
-npm install
-npm run build
-aws s3 sync .\out "s3://$FrontendBucket/" --delete
-Set-Location ..
-
-# 4. Final summary
-$CfUrl = terraform -chdir=terraform output -raw cloudfront_url
-Write-Host "Deployment complete!" -ForegroundColor Green
-Write-Host "CloudFront URL : $CfUrl" -ForegroundColor Cyan
-if ($CustomUrl) {
-    Write-Host "Custom domain  : $CustomUrl" -ForegroundColor Cyan
-}
-Write-Host "API Gateway    : $ApiUrl" -ForegroundColor Cyan
+Write-Host "Infrastructure for $Environment has been destroyed!" -ForegroundColor Green
+Write-Host ""
+Write-Host "  To remove the workspace completely, run:" -ForegroundColor Cyan
+Write-Host "   terraform workspace select default" -ForegroundColor White
+Write-Host "   terraform workspace delete $Environment" -ForegroundColor White
