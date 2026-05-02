@@ -16,26 +16,17 @@ def main():
     # Create package directory
     os.makedirs("lambda-package")
 
-    # Install dependencies using Docker with Lambda runtime image
-    print("Installing dependencies for Lambda runtime...")
-
-    # Use the official AWS Lambda Python 3.12 image
-    # This ensures compatibility with Lambda's runtime environment
+    # Install dependencies directly (no Docker needed)
+    print("Installing dependencies...")
     subprocess.run(
         [
-            "docker",
-            "run",
-            "--rm",
-            "-v",
-            f"{os.getcwd()}:/var/task",
-            "--platform",
-            "linux/amd64",  # Force x86_64 architecture
-            "--entrypoint",
-            "",  # Override the default entrypoint
-            "public.ecr.aws/lambda/python:3.12",
-            "/bin/sh",
-            "-c",
-            "pip install --target /var/task/lambda-package -r /var/task/requirements.txt --platform manylinux2014_x86_64 --only-binary=:all: --upgrade",
+            "pip",
+            "install",
+            "--target", "lambda-package",
+            "--platform", "manylinux2014_x86_64",
+            "--only-binary=:all:",
+            "--upgrade",
+            "-r", "requirements.txt"
         ],
         check=True,
     )
@@ -45,7 +36,7 @@ def main():
     for file in ["server.py", "lambda_handler.py", "context.py", "resources.py"]:
         if os.path.exists(file):
             shutil.copy2(file, "lambda-package/")
-    
+
     # Copy data directory
     if os.path.exists("data"):
         shutil.copytree("data", "lambda-package/data")
