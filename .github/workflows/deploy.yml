@@ -19,12 +19,19 @@ permissions:
   id-token: write
   contents: read
 
+concurrency:
+  group: deploy-${{ github.event.inputs.environment || 'dev' }}
+  cancel-in-progress: false
+
 jobs:
   deploy:
     name: Deploy to ${{ github.event.inputs.environment || 'dev' }}
     runs-on: ubuntu-latest
     environment: ${{ github.event.inputs.environment || 'dev' }}
-    
+
+    env:
+      DEPLOY_ENV: ${{ github.event.inputs.environment || 'dev' }}
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -49,7 +56,7 @@ jobs:
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
         with:
-          terraform_wrapper: false  # Important: disable wrapper to get raw outputs
+          terraform_wrapper: false
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -60,40 +67,39 @@ jobs:
 
       - name: Run Deployment Script
         run: |
-          # Set environment variables for the script
-          export AWS_ACCOUNT_ID=${{ secrets.AWS_ACCOUNT_ID }}
-          export DEFAULT_AWS_REGION=${{ secrets.DEFAULT_AWS_REGION }}
-          
-          # Make script executable and run it
           chmod +x scripts/deploy.sh
-          ./scripts/deploy.sh ${{ github.event.inputs.environment || 'dev' }}
+          ./scripts/deploy.sh $DEPLOY_ENV
         env:
-          AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
-          
+          AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+          DEFAULT_AWS_REGION: ${{ secrets.DEFAULT_AWS_REGION }}
+
       - name: Get Deployment URLs
         id: deploy_outputs
         working-directory: ./terraform
         run: |
-          terraform workspace select ${{ github.event.inputs.environment || 'dev' }}
+          terraform init \
+            -backend-config="bucket=$TF_STATE_BUCKET" \
+            -backend-config="key=$DEPLOY_ENV/terraform.tfstate" \
+            -backend-config="region=$TF_STATE_REGION" \
+            -reconfigure
+          terraform workspace select $DEPLOY_ENV || terraform workspace new $DEPLOY_ENV
           echo "cloudfront_url=$(terraform output -raw cloudfront_url)" >> $GITHUB_OUTPUT
+          echo "cloudfront_id=$(terraform output -raw cloudfront_distribution_id)" >> $GITHUB_OUTPUT
           echo "api_url=$(terraform output -raw api_gateway_url)" >> $GITHUB_OUTPUT
           echo "frontend_bucket=$(terraform output -raw s3_frontend_bucket)" >> $GITHUB_OUTPUT
+        env:
+          TF_STATE_BUCKET: ${{ secrets.TF_STATE_BUCKET }}
+          TF_STATE_REGION: ${{ secrets.TF_STATE_REGION }}
 
       - name: Invalidate CloudFront
         run: |
-          DISTRIBUTION_ID=$(aws cloudfront list-distributions \
-            --query "DistributionList.Items[?Origins.Items[?DomainName=='${{ steps.deploy_outputs.outputs.frontend_bucket }}.s3-website-${{ secrets.DEFAULT_AWS_REGION }}.amazonaws.com']].Id | [0]" \
-            --output text)
-          
-          if [ "$DISTRIBUTION_ID" != "None" ] && [ -n "$DISTRIBUTION_ID" ]; then
-            aws cloudfront create-invalidation \
-              --distribution-id $DISTRIBUTION_ID \
-              --paths "/*"
-          fi
+          aws cloudfront create-invalidation \
+            --distribution-id ${{ steps.deploy_outputs.outputs.cloudfront_id }} \
+            --paths "/*"
 
       - name: Deployment Summary
         run: |
           echo "✅ Deployment Complete!"
           echo "🌐 CloudFront URL: ${{ steps.deploy_outputs.outputs.cloudfront_url }}"
-          echo "📡 API Gateway: ${{ steps.deploy_outputs.outputs.api_url }}"
+          echo "📡 API Gateway:    ${{ steps.deploy_outputs.outputs.api_url }}"
           echo "🪣 Frontend Bucket: ${{ steps.deploy_outputs.outputs.frontend_bucket }}"
